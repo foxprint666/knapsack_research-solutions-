@@ -1,0 +1,35 @@
+﻿# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.benchmarks/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Large raw dataset archives (e.g. 8GB+ Azure CSV dumps)
+*.csv.gz
+*.gz
+*.zip
+*.tar
+*.tar.gz
+**/data/
+
+# Legacy / Unused exploratory directories
+lbhf-docs/
+mo gate test (repaired)/
+m0/
+
+# OS and Editor artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
