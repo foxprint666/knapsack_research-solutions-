@@ -44,7 +44,7 @@ class PhysicsEmulatedNVMLDevice:
       - Controllable phase offset (tau) and pacing micro-barriers.
     """
     def __init__(self, device_id: int, natural_period_ms: float = 420.0,
-                 duty_cycle: float = 0.75,
+                 duty_cycle: float = 0.50,
                  peak_power_w: float = 380.0,
                  comm_power_w: float = 120.0,
                  jitter_std_ms: float = 4.0):
@@ -173,13 +173,17 @@ class LiveClosedLoopBenchmark:
         # ---------------------------------------------------------------------
         t0 = 1000.0
         num_warmup_steps = int(2.5 * self.sampling_hz) # 2.5 seconds of warmup
+        warmup_power_history = []
 
         for step in range(num_warmup_steps):
             t = t0 + step * self.dt_sec
             p1 = self.hw_sensor_1.read_power_kw(t)
             p2 = self.hw_sensor_2.read_power_kw(t)
+            warmup_power_history.append(p1 + p2)
             self.telemetry_1.ingest_reading(p1, timestamp_sec=t)
             self.telemetry_2.ingest_reading(p2, timestamp_sec=t)
+
+        uncoord_max = max(warmup_power_history)
 
         state_1 = self.telemetry_1.poll_spectral_state(assumed_period_sec=0.42)
         state_2 = self.telemetry_2.poll_spectral_state(assumed_period_sec=0.48)
@@ -277,8 +281,7 @@ class LiveClosedLoopBenchmark:
         # Throughput overhead calculation across 10,000 steps
         overhead_stats = self.actuator_2.compute_throughput_overhead(total_training_steps=10000)
 
-        # Calculate peak metrics
-        uncoord_max = max(p1 for p1 in aggregate_power_history[:50]) * 2.0
+        # Calculate peak metrics from genuine before-and-after sensor stream
         controlled_max = max(aggregate_power_history)
         peak_reduction_pct = ((uncoord_max - controlled_max) / uncoord_max) * 100.0
 

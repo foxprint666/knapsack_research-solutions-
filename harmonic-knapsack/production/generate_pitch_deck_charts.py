@@ -161,7 +161,7 @@ def generate_chart_2_solver_scalability() -> str:
     fig, ax = plt.subplots(figsize=(9, 5.5))
 
     ax.plot(cluster_sizes, time_greedy_harmonic, 'o--', color='#d9381e', linewidth=2.2, markersize=6,
-            label='Discrete Grid Solver (greedy_harmonic, O(N² · S · M))')
+            label='Discrete Grid Solver (Measured ≤200, Projected O(N²) >200)')
     ax.plot(cluster_sizes, time_greedy_fft, 's-', color='#2b83ba', linewidth=2.5, markersize=7,
             label='Circular Cross-Correlation IFFT Solver (greedy_fft, O(N · M log M))')
 

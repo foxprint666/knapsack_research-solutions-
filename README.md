@@ -30,7 +30,7 @@ An advanced dual-paradigm research and systems engineering codebase addressing *
 
 ## 1. System 1: Stochastic-Shaped CXL Fabric (SSCF)
 
-Located in [`sscf/`](file:///c:/Users/ASHLEY%20ALLEN/Downloads/m0-gate/sscf).
+Located in [`sscf/`](./sscf).
 
 ### Context & Empirical Proof
 Earlier theoretical models posited that cloud VMs could achieve massive density via **harmonic wave cancellation** (destructive interference of diurnal sinusoidal load waves). 
@@ -56,7 +56,7 @@ To verify this, we ran the **M0 Spectral Gate** on the real public Azure V1 flee
 
 ## 2. System 2: Harmonic Temporal Knapsack & Phase-Offset Gating
 
-Located in [`harmonic-knapsack/`](file:///c:/Users/ASHLEY%20ALLEN/Downloads/m0-gate/harmonic-knapsack).
+Located in [`harmonic-knapsack/`](./harmonic-knapsack).
 
 ### The Mathematical Lever
 Unlike classic knapsack where items are static scalars, workloads here are time-varying periodic curves $L_i(t)$. When co-allocated on a shared resource, their demands superimpose:
@@ -115,11 +115,19 @@ Built upon deep comparative analysis of foundational literature:
     │   ├── 01_problem_formulation.md          # Classic vs. Temporal Knapsack
     │   ├── 02_prior_art_and_literature.md     # Beaumont, FTIO, AI Power Capping
     │   ├── 03_verified_application_domains.md # The 7 verified engineering application domains
-    │   └── 04_signal_processing_analysis.md   # ANC FxLMS causality, Beamforming SMI / RMB
+    │   ├── 04_signal_processing_analysis.md   # ANC FxLMS causality, Beamforming SMI / RMB
+    │   └── 05_production_engineering_roadmap.md # Production Architecture & 3 Pillars
     ├── core/                                  # Core Fourier Mathematics & Solvers
     │   ├── harmonic_representation.py         # Spectral decomposition, FTIO confidence
-    │   ├── phase_shift_math.py                # Exact analytical phase rotation
-    │   └── temporal_knapsack_solver.py        # Peak-Minimization & Value-Maximization
+    │   ├── phase_shift_math.py                # Exact analytical phase rotation & O(M log M) IFFT
+    │   └── temporal_knapsack_solver.py        # Peak-Minimization, Value-Maximization & greedy_fft
+    ├── production/                            # Production Hardware & Closed-Loop Modules
+    │   ├── telemetry_sensor.py                # Pillar 1: Sub-second NVML/PDU Telemetry Sensor
+    │   ├── nccl_actuator_hook.py              # Pillar 2: Micro-barrier AllReduce Actuator Hook
+    │   ├── rate_diversity_controller.py       # Pillar 3: DynamicBatchPacer & Harmonic Quantizer
+    │   ├── live_nvml_benchmark.py             # End-to-end closed-loop live hardware benchmark
+    │   ├── generate_pitch_deck_charts.py      # Pitch deck chart generator (publication quality)
+    │   └── charts/                            # Generated 300 DPI pitch-deck charts
     ├── applications/                          # Industrial Domain Models
     │   ├── hpc_checkpoint_ftio.py             # HPC Checkpoint I/O Staging (FTIO model)
     │   ├── ai_training_power_cap.py           # AI GPU Cluster Power-Cap Phase Scattering
@@ -129,9 +137,10 @@ Built upon deep comparative analysis of foundational literature:
     │   ├── anc_fxlms_simulator.py             # FxLMS ANC with causality & Pareto stability
     │   └── adaptive_beamformer.py             # MVDR Capon beamformer with steering mismatch
     └── tests/                                 # Harmonic Test Suite
-        ├── test_harmonic_math.py
-        ├── test_solver_benchmarks.py
-        └── test_signal_processing.py
+        ├── test_harmonic_math.py              # Phase math & IFFT cross-correlation tests
+        ├── test_solver_benchmarks.py          # Solvers & domain application benchmarks
+        ├── test_signal_processing.py          # ANC & Beamforming verification
+        └── test_production_runtime.py         # Sensor, Actuator & Closed-Loop hardware tests
 ```
 
 ---
@@ -147,14 +156,14 @@ python sscf/tests/test_components.py
 python sscf/tests/test_sscf_end_to_end.py
 ```
 
-### Running System 2 (Harmonic Knapsack) Tests
+### Running System 2 (Harmonic Knapsack) Tests & Benchmarks
 ```bash
-# Harmonic Fourier decomposition & phase math unit tests
-python harmonic-knapsack/tests/test_harmonic_math.py
+# Complete pytest test suite (all 19 tests across math, solvers, and production)
+python -m pytest harmonic-knapsack/tests/
 
-# Knapsack peak-shaving, value-maximization & domain application benchmarks
-python harmonic-knapsack/tests/test_solver_benchmarks.py
+# Run the live closed-loop NVML hardware benchmark (Sensor -> Controller -> Actuator)
+python harmonic-knapsack/production/live_nvml_benchmark.py
 
-# Active Noise Cancellation causality & Adaptive Beamforming nulling tests
-python harmonic-knapsack/tests/test_signal_processing.py
+# Generate the 3 pitch-deck charts (saved to harmonic-knapsack/production/charts/)
+python harmonic-knapsack/production/generate_pitch_deck_charts.py
 ```
