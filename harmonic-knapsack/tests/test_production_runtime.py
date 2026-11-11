@@ -99,8 +99,19 @@ def test_rate_diversity_beat_frequency_and_pacing():
     assert 5 in clusters[-1.0]  # Isolated
     print(f"[PASS] test_rate_diversity: Beat freq={beat['beat_frequency_hz']:.3f}Hz, Recurrence={beat['beat_recurrence_sec']:.2f}s, Clusters={clusters}")
 
+def test_live_nvml_closed_loop_benchmark():
+    from production.live_nvml_benchmark import LiveClosedLoopBenchmark
+    benchmark = LiveClosedLoopBenchmark(simulation_duration_sec=3.0, sampling_hz=50.0)
+    res = benchmark.run()
+    assert res["target_period_sec"] == 0.500
+    assert res["controlled_peak_kw"] < res["uncoordinated_peak_kw"]
+    assert res["peak_reduction_pct"] > 25.0
+    assert res["throughput_overhead"]["effective_throughput_retention_pct"] > 99.90
+    print(f"[PASS] test_live_nvml_closed_loop_benchmark: Peak reduced by {res['peak_reduction_pct']:.1f}%, Retention={res['throughput_overhead']['effective_throughput_retention_pct']:.4f}%")
+
 if __name__ == "__main__":
     test_telemetry_sensor_ring_buffer_and_analyzer()
     test_nccl_actuator_hook_throughput_retention()
     test_rate_diversity_beat_frequency_and_pacing()
+    test_live_nvml_closed_loop_benchmark()
     print("\nAll production runtime tests passed successfully!")
