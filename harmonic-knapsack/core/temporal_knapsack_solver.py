@@ -83,6 +83,58 @@ class TemporalHarmonicKnapsackSolver:
                 "aggregate_curve": uncoord_curve
             }
 
+        elif method == "greedy_fft":
+            # True O(N * M log M) circular cross-correlation IFFT solver
+            sorted_indices = sorted(range(len(items)), key=lambda i: items[i].peak_load, reverse=True)
+            offsets = [0.0] * len(items)
+            eval_points = max(512, self.search_resolution_bins * 4)
+            t_grid = np.linspace(0.0, T_hyper, eval_points, endpoint=False)
+            dt = T_hyper / eval_points
+
+            first_idx = sorted_indices[0]
+            agg_curve = items[first_idx].profile.evaluate(t_grid, phase_offset_seconds=0.0)
+            offsets[first_idx] = 0.0
+
+            for idx in sorted_indices[1:]:
+                item = items[idx]
+                p = item.profile
+                cand_curve = p.evaluate(t_grid, phase_offset_seconds=0.0)
+
+                # Circular cross-correlation via IFFT
+                corr = PhaseShiftEngine.cross_correlation_fft(agg_curve, cand_curve)
+
+                max_k = int(round(p.period_seconds / dt))
+                if max_k <= 0 or max_k > eval_points:
+                    max_k = eval_points
+
+                candidate_ks = np.argsort(corr[:max_k])[:min(32, max_k)]
+                best_k = 0
+                best_peak = float('inf')
+
+                for k in candidate_ks:
+                    test_curve = agg_curve + np.roll(cand_curve, k)
+                    cand_peak = float(np.max(test_curve))
+                    if cand_peak < best_peak:
+                        best_peak = cand_peak
+                        best_k = k
+
+                best_offset = float(best_k * dt)
+                offsets[idx] = best_offset
+                agg_curve = agg_curve + np.roll(cand_curve, best_k)
+
+            final_peak = float(np.max(agg_curve))
+            reduction_pct = ((uncoord_peak - final_peak) / max(1e-6, uncoord_peak)) * 100.0
+
+            return {
+                "method": "greedy_fft",
+                "peak_load": final_peak,
+                "uncoordinated_peak": uncoord_peak,
+                "peak_reduction_pct": reduction_pct,
+                "offsets_seconds": offsets,
+                "hyperperiod_seconds": T_hyper,
+                "aggregate_curve": agg_curve
+            }
+
         elif method == "greedy_harmonic":
             # Sort items descending by standalone peak demand
             sorted_indices = sorted(range(len(items)), key=lambda i: items[i].peak_load, reverse=True)

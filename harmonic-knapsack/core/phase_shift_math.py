@@ -84,6 +84,63 @@ class PhaseShiftEngine:
         return t_grid, agg_load, peak_load
 
     @staticmethod
+    def cross_correlation_fft(s1: np.ndarray, s2: np.ndarray) -> np.ndarray:
+        """
+        Computes the circular cross-correlation R_12[k] = sum_n s1[n] * s2[(n - k) % M]
+        for all offsets k in O(M log M) using the FFT circular correlation theorem:
+        R_12 = irfft(rfft(s1) * conj(rfft(s2)))
+        """
+        M = len(s1)
+        assert len(s2) == M, "Signals must have identical length for circular correlation"
+        S1 = np.fft.rfft(s1)
+        S2 = np.fft.rfft(s2)
+        corr = np.fft.irfft(S1 * np.conj(S2), n=M)
+        return corr
+
+    @staticmethod
+    def find_optimal_offset_fft(p1: HarmonicProfile, p2: HarmonicProfile,
+                                eval_points: int = 512) -> Tuple[float, float, float]:
+        """
+        Finds the start offset tau in [0, p2.period) that minimizes the peak of p1 + p2
+        using O(M log M) circular cross-correlation via IFFT.
+        Returns: (optimal_offset_sec, min_peak, uncoordinated_in_phase_peak)
+        """
+        T_hyper = compute_hyperperiod([p1.period_seconds, p2.period_seconds])
+        if math.isinf(T_hyper) or T_hyper <= 0:
+            T_hyper = max(p1.period_seconds, p2.period_seconds)
+
+        t_grid = np.linspace(0.0, T_hyper, eval_points, endpoint=False)
+        dt = T_hyper / eval_points
+        load1 = p1.evaluate(t_grid, phase_offset_seconds=0.0)
+        load2 = p2.evaluate(t_grid, phase_offset_seconds=0.0)
+
+        uncoordinated_peak = float(np.max(load1 + load2))
+
+        # Circular cross-correlation via IFFT
+        corr = PhaseShiftEngine.cross_correlation_fft(load1, load2)
+
+        # Restrict offset search to [0, p2.period_seconds)
+        max_k = int(round(p2.period_seconds / dt))
+        if max_k <= 0 or max_k > eval_points:
+            max_k = eval_points
+
+        # Candidate offsets: pick the top candidates with lowest cross-correlation
+        candidate_ks = np.argsort(corr[:max_k])[:min(16, max_k)]
+
+        best_k = 0
+        min_peak = uncoordinated_peak
+
+        for k in candidate_ks:
+            rolled_load2 = np.roll(load2, k)
+            peak = float(np.max(load1 + rolled_load2))
+            if peak < min_peak:
+                min_peak = peak
+                best_k = k
+
+        best_offset = float(best_k * dt)
+        return best_offset, min_peak, uncoordinated_peak
+
+    @staticmethod
     def find_optimal_offset_binary_pair(p1: HarmonicProfile, p2: HarmonicProfile,
                                         num_search_steps: int = 128) -> Tuple[float, float, float]:
         """

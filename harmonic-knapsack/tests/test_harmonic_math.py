@@ -99,9 +99,38 @@ def test_hyperperiod_computation():
     assert abs(compute_hyperperiod([10.0, 10.5]) - 210.0) < 0.1
     print("[PASS] test_hyperperiod_computation: all LCM calculations passed.")
 
+def test_fft_cross_correlation_and_greedy_fft():
+    # Verify O(M log M) circular cross-correlation vs discrete grid search
+    period = 60.0
+    f0 = 1.0 / period
+    p1 = HarmonicProfile(period, 10.0, [HarmonicComponent(1, f0, amplitude=5.0, phase_rad=0.0)])
+    p2 = HarmonicProfile(period, 10.0, [HarmonicComponent(1, f0, amplitude=5.0, phase_rad=0.0)])
+
+    # 1. Test PhaseShiftEngine.find_optimal_offset_fft
+    best_tau, min_peak, uncoord_peak = PhaseShiftEngine.find_optimal_offset_fft(p1, p2, eval_points=512)
+    assert abs(best_tau - 30.0) < 0.5, f"Expected 30.0s offset, got {best_tau}"
+    assert abs(min_peak - 20.0) < 0.1, f"Expected min peak 20.0, got {min_peak}"
+    assert abs(uncoord_peak - 30.0) < 0.1, f"Expected uncoord peak 30.0, got {uncoord_peak}"
+
+    # 2. Test solver greedy_fft vs greedy_harmonic
+    from core.temporal_knapsack_solver import HarmonicItem, TemporalHarmonicKnapsackSolver
+    solver = TemporalHarmonicKnapsackSolver(search_resolution_bins=60)
+    items = [
+        HarmonicItem(0, "Item0", 100.0, p1),
+        HarmonicItem(1, "Item1", 100.0, p2),
+    ]
+    res_fft = solver.solve_peak_minimization(items, method="greedy_fft")
+    res_harmonic = solver.solve_peak_minimization(items, method="greedy_harmonic")
+
+    assert abs(res_fft["peak_load"] - 20.0) < 0.1
+    assert abs(res_fft["peak_load"] - res_harmonic["peak_load"]) < 0.2
+    assert res_fft["peak_reduction_pct"] >= 33.0
+    print(f"[PASS] test_fft_cross_correlation_and_greedy_fft: FFT solver peak={res_fft['peak_load']:.1f} vs Harmonic solver={res_harmonic['peak_load']:.1f}")
+
 if __name__ == "__main__":
     test_fourier_decomposition_and_reconstruction()
     test_phase_shift_frequency_vs_time_domain()
     test_antagonistic_pairing_cancellation()
     test_hyperperiod_computation()
+    test_fft_cross_correlation_and_greedy_fft()
     print("\nAll harmonic math tests passed successfully!")

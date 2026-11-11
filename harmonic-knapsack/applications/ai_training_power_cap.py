@@ -17,6 +17,7 @@ Simulates:
 """
 
 import math
+from typing import List, Dict, Any, Optional
 import numpy as np
 from core.harmonic_representation import HarmonicProfile, HarmonicComponent
 from core.phase_shift_math import PhaseShiftEngine
