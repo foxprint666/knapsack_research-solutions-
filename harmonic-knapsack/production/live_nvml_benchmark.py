@@ -47,10 +47,15 @@ class PhysicsEmulatedNVMLDevice:
                  duty_cycle: float = 0.50,
                  peak_power_w: float = 380.0,
                  comm_power_w: float = 120.0,
-                 jitter_std_ms: float = 4.0):
+                 jitter_std_ms: float = 4.0,
+                 pipeline_stage: Optional[Any] = None):
         self.device_id = device_id
-        self.natural_period_ms = float(natural_period_ms)
-        self.effective_period_ms = float(natural_period_ms)
+        self.pipeline_stage = pipeline_stage
+        if pipeline_stage is not None:
+            self.natural_period_ms = float(pipeline_stage.iteration_period_sec * 1000.0)
+        else:
+            self.natural_period_ms = float(natural_period_ms)
+        self.effective_period_ms = float(self.natural_period_ms)
         self.duty_cycle = float(duty_cycle)
         self.peak_power_w = float(peak_power_w)
         self.comm_power_w = float(comm_power_w)
@@ -67,7 +72,7 @@ class PhysicsEmulatedNVMLDevice:
     def sample_power_watts(self, current_time_sec: float) -> float:
         """
         Calculates instantaneous GPU wattage at current_time_sec,
-        including compute/comm duty cycle and stochastic timing jitter.
+        including 1F1B pipeline schedule or compute/comm duty cycle and stochastic timing jitter.
         """
         t_ms = (current_time_sec * 1000.0) - self.phase_offset_ms
         # Add slight stochastic noise to power reading
@@ -75,6 +80,16 @@ class PhysicsEmulatedNVMLDevice:
 
         # Modulo within current cycle
         cycle_pos_ms = t_ms % self.effective_period_ms
+
+        if self.pipeline_stage is not None:
+            # Map cycle position to pipeline stage iteration time
+            scale = self.pipeline_stage.iteration_period_sec / (self.effective_period_ms / 1000.0)
+            sample_t_sec = (cycle_pos_ms / 1000.0) * scale
+            base_kw = self.pipeline_stage.sample_power_at_time(sample_t_sec)
+            # convert kW to W and add noise
+            power = (base_kw * 1000.0) + power_noise
+            return max(50.0, float(power))
+
         compute_duration_ms = self.duty_cycle * self.effective_period_ms
 
         if cycle_pos_ms < compute_duration_ms:

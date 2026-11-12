@@ -4,7 +4,12 @@ Domain applications for Harmonic Placement, Checkpointing, Power Capping, and St
 """
 
 from .hpc_checkpoint_ftio import HPCCheckpointScheduler, create_synthetic_checkpoint_profile
-from .ai_training_power_cap import AIPowerCapScheduler, AITrainingJob
+from .ai_training_power_cap import (
+    AIPowerCapScheduler,
+    AITrainingJob,
+    PipelineStage1F1B,
+    PipelineParallelTrainingJob
+)
 from .cron_staggering import CronStaggerSimulator
 from .tsn_cyclic_scheduler import TSNCyclicScheduler, TSNFlow
 
@@ -13,6 +18,8 @@ __all__ = [
     "create_synthetic_checkpoint_profile",
     "AIPowerCapScheduler",
     "AITrainingJob",
+    "PipelineStage1F1B",
+    "PipelineParallelTrainingJob",
     "CronStaggerSimulator",
     "TSNCyclicScheduler",
     "TSNFlow"

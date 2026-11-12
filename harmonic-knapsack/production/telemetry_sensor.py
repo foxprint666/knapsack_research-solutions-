@@ -58,21 +58,25 @@ class StreamingSpectralAnalyzer:
     """
     def __init__(self, sampling_interval_sec: float = 0.02,
                  window_duration_sec: float = 5.0,
-                 ema_alpha: float = 0.25):
+                 ema_alpha: float = 0.25,
+                 num_harmonics: int = 4):
         self.dt = float(sampling_interval_sec)
         self.window_sec = float(window_duration_sec)
         self.ema_alpha = float(ema_alpha)
+        self.num_harmonics = int(num_harmonics)
         self.current_profile: Optional[HarmonicProfile] = None
         self.smoothed_confidence = 0.0
         self.smoothed_period_sec: Optional[float] = None
         self.smoothed_phase_rad: Optional[float] = None
 
     def update_from_buffer(self, ring_buffer: PowerSampleRingBuffer,
-                           assumed_period_sec: Optional[float] = None) -> Optional[HarmonicProfile]:
+                           assumed_period_sec: Optional[float] = None,
+                           num_harmonics: Optional[int] = None) -> Optional[HarmonicProfile]:
         """
         Extracts recent window of samples, resamples to uniform grid,
         and computes online HarmonicProfile.
         """
+        k_harmonics = self.num_harmonics if num_harmonics is None else int(num_harmonics)
         ts, powers = ring_buffer.get_snapshot()
         if len(ts) < 16:
             return None
@@ -99,7 +103,7 @@ class StreamingSpectralAnalyzer:
             series=p_uniform,
             sampling_interval_sec=self.dt,
             assumed_period_sec=assumed_period_sec,
-            num_harmonics=4
+            num_harmonics=k_harmonics
         )
 
         # Update EMA smoothed estimates
@@ -144,13 +148,15 @@ class TelemetrySensor:
     High-level Sensor abstraction representing an active telemetry stream
     from an NVML/DCGM daemon or rack PDU.
     """
-    def __init__(self, job_id: int, sampling_rate_hz: float = 50.0):
+    def __init__(self, job_id: int, sampling_rate_hz: float = 50.0,
+                 window_duration_sec: float = 4.0, num_harmonics: int = 4):
         self.job_id = job_id
         self.sampling_interval_sec = 1.0 / max(1.0, sampling_rate_hz)
         self.buffer = PowerSampleRingBuffer(capacity=2048)
         self.analyzer = StreamingSpectralAnalyzer(
             sampling_interval_sec=self.sampling_interval_sec,
-            window_duration_sec=4.0
+            window_duration_sec=float(window_duration_sec),
+            num_harmonics=int(num_harmonics)
         )
 
     def ingest_reading(self, power_kw: float, timestamp_sec: Optional[float] = None) -> None:
@@ -158,9 +164,14 @@ class TelemetrySensor:
         t = time.time() if timestamp_sec is None else timestamp_sec
         self.buffer.append(t, power_kw)
 
-    def poll_spectral_state(self, assumed_period_sec: Optional[float] = None) -> Dict[str, Any]:
+    def poll_spectral_state(self, assumed_period_sec: Optional[float] = None,
+                            num_harmonics: Optional[int] = None) -> Dict[str, Any]:
         """Polls the latest spectral estimate and telemetry status."""
-        prof = self.analyzer.update_from_buffer(self.buffer, assumed_period_sec=assumed_period_sec)
+        prof = self.analyzer.update_from_buffer(
+            self.buffer,
+            assumed_period_sec=assumed_period_sec,
+            num_harmonics=num_harmonics
+        )
         return {
             "job_id": self.job_id,
             "sample_count": len(self.buffer),
