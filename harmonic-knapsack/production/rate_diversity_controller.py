@@ -10,18 +10,18 @@ destructive peak collisions.
 Provides two production-grade mechanisms:
 1. Harmonic Period Quantization & Clustering (co-locating harmonic jobs).
 2. Dynamic Mini-Batch Pacing (synthesizing stationary harmonic relationships
-   to eliminate beat frequencies).
+   to eliminate beat frequencies without false harmonization claims).
 """
 
 import math
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 
-from core.phase_shift_math import compute_hyperperiod
+from core.phase_shift_math import compute_rational_hyperperiod
 
 class HarmonicPeriodQuantizer:
     """
-    Groups disparate jobs into harmonic frequency buckets to prevent hyperperiod explosion
+    Groups disparate jobs into harmonic frequency families to prevent hyperperiod explosion
     and eliminate cross-frequency beat phenomena.
     """
     def __init__(self, base_period_families: Optional[List[float]] = None):
@@ -74,19 +74,21 @@ class DynamicBatchPacer:
         """
         Calculates the beat frequency f_beat = |f_A - f_B| and the recurrence
         interval at which out-of-phase jobs collide.
+        Uses exact rational hyperperiod computation.
         """
         f_a = 1.0 / period_a_sec
         f_b = 1.0 / period_b_sec
         f_beat = abs(f_a - f_b)
         t_beat = 1.0 / f_beat if f_beat > 1e-6 else float('inf')
-        t_hyper = compute_hyperperiod([period_a_sec, period_b_sec])
+        t_hyper, is_exact, err_bound = compute_rational_hyperperiod([period_a_sec, period_b_sec])
 
         return {
             "freq_a_hz": f_a,
             "freq_b_hz": f_b,
             "beat_frequency_hz": f_beat,
             "beat_recurrence_sec": t_beat,
-            "hyperperiod_sec": t_hyper
+            "hyperperiod_sec": t_hyper,
+            "is_exact_hyperperiod": float(is_exact)
         }
 
     @staticmethod
@@ -103,7 +105,6 @@ class DynamicBatchPacer:
         slowdown_pct = ((t_slow - t_fast) / t_fast) * 100.0
         
         if slowdown_pct <= max_slowdown_pct:
-            # Feasible to lock directly to t_slow
             return {
                 "strategy": "direct_1_to_1_lock",
                 "unified_period_sec": t_slow,
@@ -142,17 +143,22 @@ class RateDiversityController:
         self.quantizer = quantizer or HarmonicPeriodQuantizer()
         self.pacer = DynamicBatchPacer()
 
-    def process_cluster_jobs(self, jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def process_cluster_jobs(self, jobs: List[Dict[str, Any]],
+                             max_slowdown_pct: float = 15.0) -> Dict[str, Any]:
         """
         Analyzes a fleet of jobs with varied periods and synthesizes an optimal
         placement and pacing strategy.
+        
+        Guarantees that a job is only marked harmonized if its resulting period
+        strictly matches an exact integer harmonic multiple of the family base period
+        without exceeding allowable slowdown.
         """
-        period_map = {j["job_id"]: j["iteration_period_sec"] for j in jobs}
+        period_map = {j["job_id"]: float(j["iteration_period_sec"]) for j in jobs}
         clusters = self.quantizer.cluster_jobs_by_harmonic_family(period_map)
 
         cluster_plans = []
         for family_target, member_ids in clusters.items():
-            if family_target == -1.0:
+            if family_target == -1.0 or not member_ids:
                 cluster_plans.append({
                     "family_period_sec": None,
                     "members": member_ids,
@@ -160,19 +166,36 @@ class RateDiversityController:
                 })
                 continue
 
-            member_periods = [period_map[jid] for jid in member_ids]
-            max_p = max(member_periods)
             pacing_plans = {}
+            harmonized_periods = {}
+            harmonic_multipliers = {}
+            all_harmonized = True
+
             for jid in member_ids:
                 p = period_map[jid]
-                delay_ms = max(0.0, (family_target - p) * 1000.0)
-                pacing_plans[jid] = delay_ms
+                # Pacing can only slow down a job (T_paced >= p), never accelerate
+                m = max(1, int(math.ceil(p / family_target)))
+                target_p = m * family_target
+                slowdown_pct = ((target_p - p) / p) * 100.0
+
+                if slowdown_pct <= max_slowdown_pct:
+                    delay_ms = (target_p - p) * 1000.0
+                    pacing_plans[jid] = delay_ms
+                    harmonized_periods[jid] = target_p
+                    harmonic_multipliers[jid] = m
+                else:
+                    all_harmonized = False
+                    pacing_plans[jid] = 0.0
+                    harmonized_periods[jid] = p
+                    harmonic_multipliers[jid] = None
 
             cluster_plans.append({
                 "family_period_sec": family_target,
                 "members": member_ids,
-                "status": "harmonized",
-                "pacing_delays_ms": pacing_plans
+                "status": "harmonized" if all_harmonized else "unharmonized_isolated",
+                "pacing_delays_ms": pacing_plans,
+                "harmonized_periods_sec": harmonized_periods,
+                "harmonic_multipliers": harmonic_multipliers
             })
 
         return {

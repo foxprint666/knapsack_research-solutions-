@@ -7,32 +7,44 @@ Implements:
        min_{tau_1 ... tau_N} max_t sum_i L_i(t - tau_i)
   2. Problem Formulation B: Value-Maximizing Temporal Harmonic Knapsack
        max sum_i v_i x_i  s.t. max_t sum_i x_i L_i(t - tau_i) <= C
-  3. Solvers:
-       - Uncoordinated Baseline (in-phase peak collision)
-       - Greedy Harmonic Staggering (fast sequential phase search)
-       - Simulated Annealing Phase Optimizer (global multi-harmonic optimization)
-       - Static Peak Reservation Baseline comparison (demonstrating admission gain)
+  3. Solvers & Baselines:
+       - Exact Static 0/1 Knapsack (Optimal Dynamic Programming Baseline)
+       - Greedy Static Peak Density Baseline
+       - Greedy Harmonic Staggering with Continuous Certified Peak Bounds
+       - Exact Direct & Hybrid IFFT Peak Minimization
+       - Simulated Annealing Phase Optimizer
+       - Phase-Reassignment Local Search for Temporal Knapsack
 """
 
 import math
-import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
+import numpy as np
+
 from .harmonic_representation import HarmonicProfile
-from .phase_shift_math import PhaseShiftEngine, compute_hyperperiod
+from .phase_shift_math import PhaseShiftEngine, determine_evaluation_horizon, compute_rational_hyperperiod
 
 class HarmonicItem:
     """Represents a periodic workload item available for scheduling/admission."""
     def __init__(self, item_id: int, name: str, value: float,
-                 profile: HarmonicProfile):
+                 profile: HarmonicProfile,
+                 safety_margin_pct: float = 0.0):
         self.item_id = item_id
         self.name = name
         self.value = float(value)
         self.profile = profile
+        self.safety_margin_pct = float(safety_margin_pct)
         
-        # Precompute standalone peak and mean
-        t_sample = np.linspace(0.0, profile.period_seconds, 256, endpoint=False)
+        # Precompute standalone certified continuous peak and mean
+        t_sample = np.linspace(0.0, profile.period_seconds, 512, endpoint=False)
         load_sample = profile.evaluate(t_sample)
-        self.peak_load = float(np.max(load_sample))
+        self.peak_load = PhaseShiftEngine.refine_peak_adaptive(
+            profiles=[profile],
+            offsets_seconds=[0.0],
+            t_grid=t_sample,
+            sampled_curve=load_sample,
+            eval_horizon_sec=profile.period_seconds,
+            safety_margin_pct=safety_margin_pct
+        )
         self.mean_load = profile.dc_mean
         
         # Value density per unit peak demand
@@ -48,28 +60,82 @@ class TemporalHarmonicKnapsackSolver:
     """
     Main solver class for Peak-Minimization and Value-Maximization under harmonic constraints.
     """
-    def __init__(self, search_resolution_bins: int = 64):
+    def __init__(self, search_resolution_bins: int = 64,
+                 eval_points: int = 512,
+                 safety_margin_pct: float = 0.0):
         self.search_resolution_bins = search_resolution_bins
+        self.eval_points = max(256, eval_points)
+        self.safety_margin_pct = float(safety_margin_pct)
+
+    @staticmethod
+    def solve_exact_static_knapsack(items: List[HarmonicItem],
+                                    capacity: float,
+                                    granularity_precision: float = 0.05) -> Dict[str, Any]:
+        """
+        Exact pseudo-polynomial Dynamic Programming baseline for the standard 0/1 Static Knapsack.
+        Solves: max sum(v_i * x_i) s.t. sum(peak_i * x_i) <= capacity.
+        Provides an undeniable mathematical ground-truth baseline to compare harmonic packing against.
+        """
+        if not items or capacity <= 0:
+            return {"admitted_items": [], "total_value": 0.0, "reserved_peak": 0.0}
+
+        precision = max(1e-4, granularity_precision)
+        cap_int = int(round(capacity / precision))
+        N = len(items)
+        weights = [max(1, int(round(it.peak_load / precision))) for it in items]
+        values = [it.value for it in items]
+
+        dp = [0.0] * (cap_int + 1)
+        keep = [[False] * (cap_int + 1) for _ in range(N)]
+
+        for i in range(N):
+            w_i = weights[i]
+            v_i = values[i]
+            for w in range(cap_int, w_i - 1, -1):
+                if dp[w - w_i] + v_i > dp[w]:
+                    dp[w] = dp[w - w_i] + v_i
+                    keep[i][w] = True
+
+        # Backtrack optimal selection
+        curr_w = cap_int
+        admitted_indices = []
+        for i in range(N - 1, -1, -1):
+            if keep[i][curr_w]:
+                admitted_indices.append(i)
+                curr_w -= weights[i]
+
+        admitted_indices.reverse()
+        admitted = [items[i] for i in admitted_indices]
+        total_val = float(sum(it.value for it in admitted))
+        total_peak = float(sum(it.peak_load for it in admitted))
+
+        return {
+            "admitted_count": len(admitted),
+            "admitted_items": [it.name for it in admitted],
+            "total_value": total_val,
+            "reserved_peak": total_peak
+        }
 
     def solve_peak_minimization(self, items: List[HarmonicItem],
-                                method: str = "greedy_harmonic",
+                                method: str = "greedy_fft",
                                 seed: int = 42) -> Dict[str, Any]:
         """
-        Solves Formulation A: finds start offsets tau_i to minimize the peak aggregate load.
+        Solves Formulation A: finds start offsets tau_i to minimize the continuous peak aggregate load.
         """
         if not items:
-            return {"peak_load": 0.0, "offsets": [], "uncoordinated_peak": 0.0}
+            return {"peak_load": 0.0, "offsets_seconds": [], "uncoordinated_peak": 0.0}
 
         profiles = [item.profile for item in items]
         periods = [p.period_seconds for p in profiles]
-        T_hyper = compute_hyperperiod(periods)
-        if math.isinf(T_hyper) or T_hyper <= 0:
-            T_hyper = max(periods)
+        T_horizon, is_exact, err_bound = determine_evaluation_horizon(periods, max_horizon_sec=300.0)
 
         # Baseline: Uncoordinated (all offsets = 0)
         zero_offsets = [0.0] * len(items)
         t_grid, uncoord_curve, uncoord_peak = PhaseShiftEngine.combine_harmonic_profiles(
-            profiles, zero_offsets, eval_points=512
+            profiles, zero_offsets, eval_points=self.eval_points,
+            eval_horizon_sec=T_horizon,
+            adaptive_refinement=True,
+            safety_margin_pct=self.safety_margin_pct
         )
 
         if method == "uncoordinated":
@@ -79,39 +145,45 @@ class TemporalHarmonicKnapsackSolver:
                 "uncoordinated_peak": uncoord_peak,
                 "peak_reduction_pct": 0.0,
                 "offsets_seconds": zero_offsets,
-                "hyperperiod_seconds": T_hyper,
+                "hyperperiod_seconds": T_horizon,
+                "is_exact_hyperperiod": is_exact,
                 "aggregate_curve": uncoord_curve
             }
 
-        elif method == "greedy_fft":
-            # True O(N * M log M) circular cross-correlation IFFT solver
+        elif method in ("greedy_fft", "exact_direct"):
+            # Sort items descending by standalone peak demand
             sorted_indices = sorted(range(len(items)), key=lambda i: items[i].peak_load, reverse=True)
             offsets = [0.0] * len(items)
-            eval_points = max(512, self.search_resolution_bins * 4)
-            t_grid = np.linspace(0.0, T_hyper, eval_points, endpoint=False)
-            dt = T_hyper / eval_points
+            eval_pts = max(512, self.eval_points)
+            t_eval = np.linspace(0.0, T_horizon, eval_pts, endpoint=False)
+            dt = T_horizon / eval_pts
 
             first_idx = sorted_indices[0]
-            agg_curve = items[first_idx].profile.evaluate(t_grid, phase_offset_seconds=0.0)
+            agg_curve = items[first_idx].profile.evaluate(t_eval, phase_offset_seconds=0.0)
             offsets[first_idx] = 0.0
 
             for idx in sorted_indices[1:]:
-                item = items[idx]
-                p = item.profile
-                cand_curve = p.evaluate(t_grid, phase_offset_seconds=0.0)
-
-                # Circular cross-correlation via IFFT
-                corr = PhaseShiftEngine.cross_correlation_fft(agg_curve, cand_curve)
+                p = items[idx].profile
+                cand_curve = p.evaluate(t_eval, phase_offset_seconds=0.0)
 
                 max_k = int(round(p.period_seconds / dt))
-                if max_k <= 0 or max_k > eval_points:
-                    max_k = eval_points
+                if max_k <= 0 or max_k > eval_pts:
+                    max_k = eval_pts
 
-                candidate_ks = np.argsort(corr[:max_k])[:min(32, max_k)]
+                # Vectorized or hybrid search over all candidate offsets
                 best_k = 0
                 best_peak = float('inf')
 
-                for k in candidate_ks:
+                if eval_pts <= 1024 or method == "exact_direct":
+                    # Evaluate every discrete offset directly to guarantee finding the true L_inf peak minimum
+                    candidates = range(max_k)
+                else:
+                    corr = PhaseShiftEngine.cross_correlation_fft(agg_curve, cand_curve)
+                    l2_cands = list(np.argsort(corr[:max_k])[:min(64, max_k)])
+                    strat_cands = list(np.linspace(0, max_k - 1, min(64, max_k), dtype=int))
+                    candidates = sorted(set(l2_cands + strat_cands))
+
+                for k in candidates:
                     test_curve = agg_curve + np.roll(cand_curve, k)
                     cand_peak = float(np.max(test_curve))
                     if cand_peak < best_peak:
@@ -122,33 +194,35 @@ class TemporalHarmonicKnapsackSolver:
                 offsets[idx] = best_offset
                 agg_curve = agg_curve + np.roll(cand_curve, best_k)
 
-            final_peak = float(np.max(agg_curve))
+            # Certified continuous peak evaluation with adaptive refinement
+            _, final_curve, final_peak = PhaseShiftEngine.combine_harmonic_profiles(
+                profiles, offsets, eval_points=eval_pts,
+                eval_horizon_sec=T_horizon,
+                adaptive_refinement=True,
+                safety_margin_pct=self.safety_margin_pct
+            )
             reduction_pct = ((uncoord_peak - final_peak) / max(1e-6, uncoord_peak)) * 100.0
 
             return {
-                "method": "greedy_fft",
+                "method": method,
                 "peak_load": final_peak,
                 "uncoordinated_peak": uncoord_peak,
                 "peak_reduction_pct": reduction_pct,
                 "offsets_seconds": offsets,
-                "hyperperiod_seconds": T_hyper,
-                "aggregate_curve": agg_curve
+                "hyperperiod_seconds": T_horizon,
+                "is_exact_hyperperiod": is_exact,
+                "aggregate_curve": final_curve
             }
 
         elif method == "greedy_harmonic":
-            # Sort items descending by standalone peak demand
             sorted_indices = sorted(range(len(items)), key=lambda i: items[i].peak_load, reverse=True)
             offsets = [0.0] * len(items)
             
-            # Place first dominant item at offset 0
             current_scheduled_profiles = [profiles[sorted_indices[0]]]
             current_scheduled_offsets = [0.0]
 
             for idx in sorted_indices[1:]:
-                item = items[idx]
-                p = item.profile
-                
-                # Search candidate offsets in [0, p.period_seconds)
+                p = items[idx].profile
                 candidate_taus = np.linspace(0.0, p.period_seconds, self.search_resolution_bins, endpoint=False)
                 best_tau = 0.0
                 best_peak = float('inf')
@@ -157,7 +231,10 @@ class TemporalHarmonicKnapsackSolver:
                     test_profiles = current_scheduled_profiles + [p]
                     test_offsets = current_scheduled_offsets + [tau]
                     _, _, cand_peak = PhaseShiftEngine.combine_harmonic_profiles(
-                        test_profiles, test_offsets, eval_points=256
+                        test_profiles, test_offsets, eval_points=self.eval_points,
+                        eval_horizon_sec=T_horizon,
+                        adaptive_refinement=True,
+                        safety_margin_pct=self.safety_margin_pct
                     )
                     if cand_peak < best_peak:
                         best_peak = cand_peak
@@ -167,9 +244,11 @@ class TemporalHarmonicKnapsackSolver:
                 current_scheduled_profiles.append(p)
                 current_scheduled_offsets.append(best_tau)
 
-            # Evaluate final curve
-            t_grid, final_curve, final_peak = PhaseShiftEngine.combine_harmonic_profiles(
-                profiles, offsets, eval_points=512
+            _, final_curve, final_peak = PhaseShiftEngine.combine_harmonic_profiles(
+                profiles, offsets, eval_points=self.eval_points,
+                eval_horizon_sec=T_horizon,
+                adaptive_refinement=True,
+                safety_margin_pct=self.safety_margin_pct
             )
             reduction_pct = ((uncoord_peak - final_peak) / max(1e-6, uncoord_peak)) * 100.0
 
@@ -179,14 +258,14 @@ class TemporalHarmonicKnapsackSolver:
                 "uncoordinated_peak": uncoord_peak,
                 "peak_reduction_pct": reduction_pct,
                 "offsets_seconds": offsets,
-                "hyperperiod_seconds": T_hyper,
+                "hyperperiod_seconds": T_horizon,
+                "is_exact_hyperperiod": is_exact,
                 "aggregate_curve": final_curve
             }
 
         elif method == "simulated_annealing":
             rng = np.random.default_rng(seed)
-            # Initialize with greedy solution
-            greedy_res = self.solve_peak_minimization(items, method="greedy_harmonic")
+            greedy_res = self.solve_peak_minimization(items, method="greedy_fft")
             current_offsets = list(greedy_res["offsets_seconds"])
             current_peak = greedy_res["peak_load"]
             best_offsets = list(current_offsets)
@@ -196,10 +275,9 @@ class TemporalHarmonicKnapsackSolver:
             cooling_rate = 0.92
             iterations_per_temp = 20
 
-            for step in range(30):
+            for _ in range(30):
                 for _ in range(iterations_per_temp):
-                    # Pick a random item (except first) and perturb offset
-                    target_i = rng.integers(0, len(items))
+                    target_i = int(rng.integers(0, len(items)))
                     p = profiles[target_i]
                     delta = rng.uniform(-0.25, 0.25) * p.period_seconds
                     new_offset = (current_offsets[target_i] + delta) % p.period_seconds
@@ -208,7 +286,10 @@ class TemporalHarmonicKnapsackSolver:
                     candidate_offsets[target_i] = new_offset
 
                     _, _, cand_peak = PhaseShiftEngine.combine_harmonic_profiles(
-                        profiles, candidate_offsets, eval_points=256
+                        profiles, candidate_offsets, eval_points=256,
+                        eval_horizon_sec=T_horizon,
+                        adaptive_refinement=False,
+                        safety_margin_pct=self.safety_margin_pct
                     )
 
                     d_e = cand_peak - current_peak
@@ -221,8 +302,11 @@ class TemporalHarmonicKnapsackSolver:
 
                 temperature *= cooling_rate
 
-            t_grid, final_curve, final_peak = PhaseShiftEngine.combine_harmonic_profiles(
-                profiles, best_offsets, eval_points=512
+            _, final_curve, final_peak = PhaseShiftEngine.combine_harmonic_profiles(
+                profiles, best_offsets, eval_points=self.eval_points,
+                eval_horizon_sec=T_horizon,
+                adaptive_refinement=True,
+                safety_margin_pct=self.safety_margin_pct
             )
             reduction_pct = ((uncoord_peak - final_peak) / max(1e-6, uncoord_peak)) * 100.0
 
@@ -232,7 +316,8 @@ class TemporalHarmonicKnapsackSolver:
                 "uncoordinated_peak": uncoord_peak,
                 "peak_reduction_pct": reduction_pct,
                 "offsets_seconds": best_offsets,
-                "hyperperiod_seconds": T_hyper,
+                "hyperperiod_seconds": T_horizon,
+                "is_exact_hyperperiod": is_exact,
                 "aggregate_curve": final_curve
             }
 
@@ -240,25 +325,40 @@ class TemporalHarmonicKnapsackSolver:
             raise ValueError(f"Unknown optimization method: {method}")
 
     def solve_value_maximization(self, candidate_items: List[HarmonicItem],
-                                 capacity: float) -> Dict[str, Any]:
+                                 capacity: float,
+                                 reassign_existing_phases: bool = True) -> Dict[str, Any]:
         """
-        Solves Formulation B: Maximize sum(v_i * x_i) subject to max_t sum_i x_i L_i(t - tau_i) <= C.
-        Compares Phase-Staggered Harmonic Knapsack vs Static Peak Knapsack.
-        """
-        # Baseline: Static Peak 0/1 Knapsack (items ordered by value density)
-        sorted_by_density = sorted(candidate_items, key=lambda it: it.value_density, reverse=True)
+        Solves Formulation B: Maximize sum(v_i * x_i) subject to continuous certified max_t sum_i x_i L_i(t - tau_i) <= C.
         
-        # 1. Static Peak Knapsack
-        static_admitted = []
-        static_total_peak = 0.0
-        static_total_value = 0.0
-        for it in sorted_by_density:
-            if static_total_peak + it.peak_load <= capacity:
-                static_admitted.append(it)
-                static_total_peak += it.peak_load
-                static_total_value += it.value
+        Compares:
+          1. Exact 0/1 Static Knapsack (Dynamic Programming baseline)
+          2. Greedy 0/1 Static Knapsack (Value-density ordering heuristic)
+          3. Phase-Staggered Temporal Harmonic Knapsack with Certified Continuous Capacity Bounds
+             and optional Local-Search Phase Reassignment.
+        """
+        if not candidate_items or capacity <= 0.0:
+            return {
+                "capacity": float(capacity),
+                "static_optimal_baseline": {"total_value": 0.0, "admitted_count": 0},
+                "harmonic_staggered": {"total_value": 0.0, "admitted_count": 0},
+                "value_gain_pct": 0.0
+            }
 
-        # 2. Harmonic Phase-Staggered Knapsack
+        # 1. Exact Static DP Baseline
+        exact_static = self.solve_exact_static_knapsack(candidate_items, capacity)
+
+        # 2. Greedy Static Baseline
+        sorted_by_density = sorted(candidate_items, key=lambda it: it.value_density, reverse=True)
+        greedy_static_admitted = []
+        greedy_static_total_peak = 0.0
+        greedy_static_total_value = 0.0
+        for it in sorted_by_density:
+            if greedy_static_total_peak + it.peak_load <= capacity:
+                greedy_static_admitted.append(it)
+                greedy_static_total_peak += it.peak_load
+                greedy_static_total_value += it.value
+
+        # 3. Phase-Staggered Harmonic Knapsack with Continuous Certified Capacity Enforcement
         harmonic_admitted: List[HarmonicItem] = []
         harmonic_offsets: List[float] = []
         harmonic_total_value = 0.0
@@ -270,39 +370,98 @@ class TemporalHarmonicKnapsackSolver:
             best_tau = None
             min_resulting_peak = float('inf')
 
+            # Test placing this item across candidate phase offsets
             for tau in candidate_taus:
                 test_profiles = [item.profile for item in harmonic_admitted] + [p]
                 test_offsets = harmonic_offsets + [tau]
-                _, _, cand_peak = PhaseShiftEngine.combine_harmonic_profiles(
-                    test_profiles, test_offsets, eval_points=256
+                
+                # Fast grid check first
+                _, sampled_curve, coarse_peak = PhaseShiftEngine.combine_harmonic_profiles(
+                    test_profiles, test_offsets,
+                    eval_points=self.eval_points,
+                    adaptive_refinement=False,
+                    safety_margin_pct=self.safety_margin_pct
                 )
-                if cand_peak <= capacity and cand_peak < min_resulting_peak:
-                    min_resulting_peak = cand_peak
-                    best_tau = float(tau)
+                if coarse_peak <= capacity and coarse_peak < min_resulting_peak:
+                    # Certify continuous peak with adaptive refinement
+                    certified_peak = PhaseShiftEngine.refine_peak_adaptive(
+                        test_profiles, test_offsets,
+                        np.linspace(0.0, determine_evaluation_horizon([pr.period_seconds for pr in test_profiles])[0], self.eval_points, endpoint=False),
+                        sampled_curve,
+                        determine_evaluation_horizon([pr.period_seconds for pr in test_profiles])[0],
+                        safety_margin_pct=self.safety_margin_pct
+                    )
+                    if certified_peak <= capacity and certified_peak < min_resulting_peak:
+                        min_resulting_peak = certified_peak
+                        best_tau = float(tau)
+
+            # If not immediately fittable, attempt phase-reassignment local search if enabled
+            if best_tau is None and reassign_existing_phases and harmonic_admitted:
+                test_profiles = [item.profile for item in harmonic_admitted] + [p]
+                reassigned_offsets = list(harmonic_offsets) + [0.0]
+                T_h, _, _ = determine_evaluation_horizon([pr.period_seconds for pr in test_profiles])
+                t_grid_local = np.linspace(0.0, T_h, self.eval_points, endpoint=False)
+                # Small local 2-opt shift perturbation
+                for trial_k in range(min(3, len(harmonic_admitted))):
+                    for step_shift in (-0.25, 0.25):
+                        temp_offsets = list(reassigned_offsets)
+                        temp_offsets[trial_k] = (temp_offsets[trial_k] + step_shift * test_profiles[trial_k].period_seconds) % test_profiles[trial_k].period_seconds
+                        for cand_tau in np.linspace(0.0, p.period_seconds, 12, endpoint=False):
+                            temp_offsets[-1] = cand_tau
+                            _, sc, c_peak = PhaseShiftEngine.combine_harmonic_profiles(
+                                test_profiles, temp_offsets, eval_points=self.eval_points,
+                                adaptive_refinement=False, safety_margin_pct=self.safety_margin_pct
+                            )
+                            if c_peak <= capacity and c_peak < min_resulting_peak:
+                                cert_p = PhaseShiftEngine.refine_peak_adaptive(
+                                    test_profiles, temp_offsets, t_grid_local, sc, T_h,
+                                    safety_margin_pct=self.safety_margin_pct
+                                )
+                                if cert_p <= capacity and cert_p < min_resulting_peak:
+                                    min_resulting_peak = cert_p
+                                    best_tau = cand_tau
+                                    harmonic_offsets = temp_offsets[:-1]
+                                    break
+                        if best_tau is not None:
+                            break
+                    if best_tau is not None:
+                        break
 
             if best_tau is not None:
                 harmonic_admitted.append(it)
                 harmonic_offsets.append(best_tau)
                 harmonic_total_value += it.value
 
-        # Compute realized aggregate peak of admitted harmonic set
+        # Final certified continuous peak of admitted set
         if harmonic_admitted:
-            _, _, realized_harmonic_peak = PhaseShiftEngine.combine_harmonic_profiles(
-                [it.profile for it in harmonic_admitted], harmonic_offsets, eval_points=512
+            _, final_curve, realized_harmonic_peak = PhaseShiftEngine.combine_harmonic_profiles(
+                [it.profile for it in harmonic_admitted], harmonic_offsets,
+                eval_points=self.eval_points,
+                adaptive_refinement=True,
+                safety_margin_pct=self.safety_margin_pct
             )
         else:
             realized_harmonic_peak = 0.0
 
-        value_gain_pct = ((harmonic_total_value - static_total_value) / max(1e-6, static_total_value)) * 100.0
-        item_gain_pct = ((len(harmonic_admitted) - len(static_admitted)) / max(1, len(static_admitted))) * 100.0
+        # Gains calculated against exact static optimum
+        value_gain_vs_exact = ((harmonic_total_value - exact_static["total_value"]) / max(1e-6, exact_static["total_value"])) * 100.0
+        value_gain_vs_greedy = ((harmonic_total_value - greedy_static_total_value) / max(1e-6, greedy_static_total_value)) * 100.0
 
         return {
             "capacity": float(capacity),
+            "safety_margin_pct": self.safety_margin_pct,
             "static_baseline": {
-                "admitted_count": len(static_admitted),
-                "admitted_items": [it.name for it in static_admitted],
-                "total_value": static_total_value,
-                "reserved_peak": static_total_peak
+                "admitted_count": len(greedy_static_admitted),
+                "admitted_items": [it.name for it in greedy_static_admitted],
+                "total_value": greedy_static_total_value,
+                "reserved_peak": greedy_static_total_peak
+            },
+            "static_optimal_baseline": exact_static,
+            "greedy_static_baseline": {
+                "admitted_count": len(greedy_static_admitted),
+                "admitted_items": [it.name for it in greedy_static_admitted],
+                "total_value": greedy_static_total_value,
+                "reserved_peak": greedy_static_total_peak
             },
             "harmonic_staggered": {
                 "admitted_count": len(harmonic_admitted),
@@ -311,6 +470,7 @@ class TemporalHarmonicKnapsackSolver:
                 "total_value": harmonic_total_value,
                 "realized_peak": realized_harmonic_peak
             },
-            "value_gain_pct": value_gain_pct,
-            "admitted_items_gain_pct": item_gain_pct
+            "value_gain_pct": value_gain_vs_greedy,
+            "value_gain_vs_exact_optimal_pct": value_gain_vs_exact,
+            "admitted_items_gain_pct": ((len(harmonic_admitted) - exact_static["admitted_count"]) / max(1, exact_static["admitted_count"])) * 100.0
         }

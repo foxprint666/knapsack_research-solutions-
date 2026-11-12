@@ -1,15 +1,17 @@
 """
 harmonic-knapsack/core/harmonic_representation.py
 Module for Spectral Decomposition, Fourier Series Representation, and Periodicity Extraction.
+
 Implements:
   - Complex and Trigonometric Fourier Series decomposition
   - Extraction of top-K dominant harmonics (frequency, amplitude, phase)
   - Reconstruction of continuous/discrete periodic load profiles
   - FTIO-style periodicity confidence score from Power Spectral Density (PSD)
+  - Spectral windowing (Hann/Boxcar) and sub-harmonic fundamental validation
 """
 
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Set
 
 class HarmonicComponent:
     """Represents a single sinusoidal Fourier harmonic."""
@@ -47,6 +49,13 @@ class HarmonicProfile:
     def evaluate(self, t: np.ndarray, phase_offset_seconds: float = 0.0) -> np.ndarray:
         """
         Reconstructs the load curve at time points t with an optional start offset tau.
+        
+        Note:
+          The output is clamped using np.maximum(0.0, load) to enforce physical
+          non-negativity of resource utilization and power draw.
+          Clipping is a non-linear operation, meaning the clamped time-domain signal
+          contains residual higher-order distortion harmonics compared to the
+          untruncated linear Fourier series.
         """
         load = np.full_like(t, self.dc_mean, dtype=np.float64)
         tau = float(phase_offset_seconds)
@@ -58,20 +67,31 @@ class HarmonicProfile:
 
     @classmethod
     def from_timeseries(cls, series: np.ndarray, sampling_interval_sec: float,
-                            assumed_period_sec: Optional[float] = None,
-                            num_harmonics: int = 4) -> 'HarmonicProfile':
+                        assumed_period_sec: Optional[float] = None,
+                        num_harmonics: int = 4,
+                        window: Optional[str] = None) -> 'HarmonicProfile':
         """
         Decomposes a discrete timeseries into its dominant Fourier components.
-        Uses FFT and peak picking to compute amplitude and phase.
+        Uses FFT, optional windowing (e.g. 'hann'), sub-harmonic fundamental verification,
+        and unique-bin energy tracking to prevent inflated confidence scores.
         """
         N = len(series)
+        assert N > 0, "Time series must contain at least 1 sample"
         T_total = N * sampling_interval_sec
         dc_mean = float(np.mean(series))
         
-        # Zero-mean signal for FFT
         zero_mean = series - dc_mean
-        fft_vals = np.fft.rfft(zero_mean)
         freqs = np.fft.rfftfreq(N, d=sampling_interval_sec)
+
+        # Spectral windowing to mitigate leakage
+        if window == "hann":
+            win = np.hanning(N)
+            coherent_gain = float(np.mean(win))
+            fft_vals = np.fft.rfft(zero_mean * win)
+            scale = 2.0 / (N * coherent_gain)
+        else:
+            fft_vals = np.fft.rfft(zero_mean)
+            scale = 2.0 / N
         
         # Power Spectral Density
         psd = np.abs(fft_vals) ** 2
@@ -80,38 +100,46 @@ class HarmonicProfile:
             period_sec = float(assumed_period_sec)
             f0 = 1.0 / period_sec
         else:
-            # Auto-detect dominant fundamental frequency (excluding DC bin 0)
-            if len(psd) > 1:
-                peak_idx = 1 + np.argmax(psd[1:])
-                f0 = freqs[peak_idx]
+            # Auto-detect fundamental frequency with sub-harmonic overtone checking
+            if len(psd) > 2:
+                peak_idx = 1 + int(np.argmax(psd[1:]))
+                f_peak = freqs[peak_idx]
+
+                # Sub-harmonic check: check if half-frequency (f_peak/2) has strong energy
+                # indicating that the peak is the 2nd harmonic rather than fundamental
+                sub_half_idx = int(round(peak_idx / 2))
+                if sub_half_idx > 0 and psd[sub_half_idx] > 0.25 * psd[peak_idx]:
+                    f0 = freqs[sub_half_idx]
+                else:
+                    f0 = f_peak
                 period_sec = 1.0 / f0 if f0 > 0 else T_total
             else:
                 f0 = 1.0 / T_total
                 period_sec = T_total
 
-        # FTIO-style periodicity confidence score: ratio of energy in dominant harmonics vs total AC energy
-        total_ac_energy = np.sum(psd[1:]) + 1e-12
+        total_ac_energy = float(np.sum(psd[1:])) + 1e-12
         
         harmonics = []
+        unique_extracted_bins: Set[int] = set()
+
         for k in range(1, num_harmonics + 1):
             target_f = k * f0
             # Find closest FFT frequency bin
             closest_bin = int(np.argmin(np.abs(freqs - target_f)))
             if closest_bin < len(fft_vals):
-                # Normalized amplitude for single-sided spectrum
-                amp = (2.0 * np.abs(fft_vals[closest_bin])) / N
-                # Phase angle
-                phase = np.angle(fft_vals[closest_bin])
+                amp = float(scale * np.abs(fft_vals[closest_bin]))
+                phase = float(np.angle(fft_vals[closest_bin]))
                 harmonics.append(HarmonicComponent(
                     harmonic_order=k,
                     frequency_hz=target_f,
                     amplitude=amp,
                     phase_rad=phase
                 ))
+                if closest_bin > 0:
+                    unique_extracted_bins.add(closest_bin)
 
-        # Sum of energy captured by the extracted harmonics
-        extracted_bins = [int(np.argmin(np.abs(freqs - h.frequency_hz))) for h in harmonics]
-        extracted_energy = np.sum([psd[b] for b in extracted_bins if b < len(psd)])
+        # Confidence: Sum energy over UNIQUE bins to strictly prevent double-counting
+        extracted_energy = sum(float(psd[b]) for b in unique_extracted_bins if b < len(psd))
         confidence = float(np.clip(extracted_energy / total_ac_energy, 0.0, 1.0))
 
         return cls(

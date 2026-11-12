@@ -392,7 +392,8 @@ class AIPowerCapScheduler:
         M = len(jobs)
         assert M > 0, "Need at least one job"
         profiles = [j.profile for j in jobs]
-        period = jobs[0].iteration_period_sec
+        periods = [j.iteration_period_sec for j in jobs]
+        all_equal = all(abs(p - periods[0]) < 1e-4 for p in periods)
 
         # 1. Synchronized / Phase-Locked alignment (offsets = 0)
         zero_offsets = [0.0] * M
@@ -400,8 +401,17 @@ class AIPowerCapScheduler:
             profiles, zero_offsets, eval_points=500
         )
 
-        # 2. Phase-Scattering: distribute offsets uniformly tau_k = k * (T / M)
-        scattered_offsets = [k * (period / M) for k in range(M)]
+        # 2. Phase-Scattering: distribute offsets uniformly if homogeneous, or optimize via solver if heterogeneous
+        if all_equal:
+            period = periods[0]
+            scattered_offsets = [k * (period / M) for k in range(M)]
+        else:
+            from core.temporal_knapsack_solver import TemporalHarmonicKnapsackSolver, HarmonicItem
+            solver = TemporalHarmonicKnapsackSolver(search_resolution_bins=64)
+            items = [HarmonicItem(item_id=j.job_id, name=j.name, value=100.0, profile=j.profile) for j in jobs]
+            opt_res = solver.solve_peak_minimization(items, method="greedy_fft")
+            scattered_offsets = opt_res["offsets_seconds"]
+
         _, scattered_curve, scattered_peak = PhaseShiftEngine.combine_harmonic_profiles(
             profiles, scattered_offsets, eval_points=500
         )

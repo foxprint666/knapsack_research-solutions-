@@ -129,7 +129,9 @@ harmonic-knapsack/
 │   ├── anc_fxlms_simulator.py                 # FxLMS adaptive filter with causality & Pareto noise
 │   └── adaptive_beamformer.py                 # MVDR / Capon beamformer with SMI & steering mismatch
 └── tests/
+    ├── test_audit_defects_fixed.py            # Comprehensive tests verifying all 8 audit defect fixes
     ├── test_harmonic_math.py                  # Tests for Fourier decomposition & phase shift math
+    ├── test_pipeline_parallel_harmonics.py    # Tests for 1F1B PP staircase modeling & multi-job scattering
     ├── test_solver_benchmarks.py              # Tests for Knapsack solvers & domain applications
     ├── test_signal_processing.py              # Tests for FxLMS causality and beamforming nulling
     └── test_production_runtime.py             # Tests for Sensor, Actuator & Closed-Loop hardware
@@ -142,7 +144,7 @@ harmonic-knapsack/
 Run the complete test suite from PowerShell or terminal:
 
 ```bash
-# 1. Run full pytest test suite (all 19 tests across math, solvers, and production)
+# 1. Run full pytest test suite (all 33 tests across math, solvers, pipeline parallelism, and production)
 python -m pytest harmonic-knapsack/tests/
 
 # 2. Run the live closed-loop NVML hardware benchmark (Sensor -> Controller -> Actuator)
